@@ -213,18 +213,34 @@ func (s *Server) GetChunk(r ChunkReq, reply *Chunk) (err error) {
 
 func (s *Server) WriteChunk(r ChunkReq, vers *uint16) (err error) {
 	//to-do
-	writer := s.GlobalFiles[r.Fname].Writer
-	if writer != r.ClientID {
+	file, exists := s.GlobalFiles[r.Fname]
+	if !exists {
+		return errors.New("file not registered in server")
+	}
+
+	// log.Printf("WriteChunk: Writer=%q, ClientID=%q, Fname=%q, ChunkNum=%d",
+	// 	file.Writer, r.ClientID, r.Fname, r.ChunkNum)
+
+	if file.Writer != r.ClientID {
 		return errors.New("client is not currently designated as the file's writer")
 	}
-	s.GlobalFiles[r.Fname].Lock.Lock()
-	defer s.GlobalFiles[r.Fname].Lock.Unlock()
+	file.Lock.Lock()
+	defer file.Lock.Unlock()
 
-	info := s.GlobalFiles[r.Fname].Chunks[r.ChunkNum]
+	info, ok := file.Chunks[r.ChunkNum]
+	if !ok {
+		info = ChunkInfo{
+			LatestVers: 0,
+			Owners:     []string{},
+		}
+	}
+
 	info.LatestVers++
 	info.Owners = []string{r.ClientID} //the writer is now currently the only one with the newest version of the chunk
+
+	file.Chunks[r.ChunkNum] = info
+	s.GlobalFiles[r.Fname] = file
 	*vers = info.LatestVers
-	s.GlobalFiles[r.Fname].Chunks[r.ChunkNum] = info
 
 	return nil
 }

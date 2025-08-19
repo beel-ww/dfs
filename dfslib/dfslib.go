@@ -416,9 +416,10 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 		}
 		//to-do
 		fmt.Printf("attempting to read %s", f.DaFile.Name())
+		name := strings.TrimPrefix(f.DaFile.Name(), f.Client.LocalPath)
 		var latest bool
 		f.Client.DFSClient.Call("Server.CheckVers", cs.CheckReq{
-			Fname:    strings.TrimSuffix(f.DaFile.Name(), ".dfs"),
+			Fname:    strings.TrimSuffix(name, ".dfs"),
 			ChunkNum: chunkNum,
 			Vers:     f.VMap[chunkNum],
 		}, &latest)
@@ -426,7 +427,7 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 		var data Chunk
 		if !latest {
 			err := f.Client.DFSClient.Call("Server.GetChunk", cs.ChunkReq{
-				Fname:    strings.TrimSuffix(f.DaFile.Name(), ".dfs"),
+				Fname:    strings.TrimSuffix(name, ".dfs"),
 				ChunkNum: chunkNum,
 			}, &data)
 			if err != nil {
@@ -440,7 +441,8 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 			panic(err)
 		}
 		*chunk = data
-		fmt.Println(data)
+		s := string(chunk[:])
+		fmt.Println(s)
 
 		return nil
 	case DREAD:
@@ -476,9 +478,10 @@ func (f *DFile) Write(chunkNum uint8, chunk *Chunk) (err error) {
 		}
 
 		var vers *uint16
+		name := strings.TrimPrefix(f.DaFile.Name(), f.Client.LocalPath)
 		err = f.Client.DFSClient.Call("Server.WriteChunk", cs.ChunkReq{
 			ClientID: f.Client.ClientID,
-			Fname:    strings.TrimSuffix(f.DaFile.Name(), ".dfs"),
+			Fname:    strings.TrimSuffix(name, ".dfs"),
 			ChunkNum: chunkNum,
 		}, &vers)
 		if err != nil {
@@ -495,18 +498,23 @@ func (f *DFile) Close() (err error) {
 	switch f.Mode {
 	case READ, WRITE:
 		var succ bool
+		name := strings.TrimPrefix(f.DaFile.Name(), f.Client.LocalPath)
 		err = f.Client.DFSClient.Call("Server.Close", cs.CloseReq{
 			ClientID: f.Client.ClientID,
-			Fname:    strings.TrimSuffix(f.DaFile.Name(), ".dfs"),
+			Fname:    strings.TrimSuffix(name, ".dfs"),
 		}, &succ)
 		if err != nil || !succ {
 			fmt.Println("the server failed to register the file close")
 		}
-		saveMap(filepath.Join(f.Client.LocalPath, strings.TrimSuffix(f.DaFile.Name(), ".dfs")), f.VMap)
+		if err := saveMap(strings.TrimSuffix(f.DaFile.Name(), ".dfs"), f.VMap); err != nil {
+			return err
+		}
 		err = f.DaFile.Close()
 		return err
 	case DREAD:
-		saveMap(filepath.Join(f.Client.LocalPath, strings.TrimSuffix(f.DaFile.Name(), ".dfs")), f.VMap)
+		if err := saveMap(strings.TrimSuffix(f.DaFile.Name(), ".dfs"), f.VMap); err != nil {
+			return err
+		}
 		err = f.DaFile.Close()
 		return err
 	}
