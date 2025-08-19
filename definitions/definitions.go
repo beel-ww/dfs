@@ -151,15 +151,18 @@ func (s *Server) Open(o OpenReq, succ *bool) (err error) {
 	case WRITE:
 		f, exists := s.GlobalFiles[o.Fname]
 		if exists {
-			if f.Writer != "" {
+			if f.Writer != "" && f.Writer != o.ClientID {
 				*succ = false
-				return nil
+				return fmt.Errorf("file %s is already opened for WRITE by client %s", o.Fname, f.Writer)
 			}
+			f.Writer = o.ClientID
+			s.GlobalFiles[o.Fname] = f
+			*succ = true
+			return nil
 		}
 
-		rwlock := new(sync.RWMutex)
 		s.GlobalFiles[o.Fname] = FileInfo{
-			Lock:   rwlock,
+			Lock:   &sync.RWMutex{},
 			Chunks: make(map[uint8]ChunkInfo),
 			Writer: o.ClientID,
 		}
@@ -210,7 +213,8 @@ func (s *Server) GetChunk(r ChunkReq, reply *Chunk) (err error) {
 
 func (s *Server) WriteChunk(r ChunkReq, vers *uint16) (err error) {
 	//to-do
-	if s.GlobalFiles[r.Fname].Writer != r.ClientID {
+	writer := s.GlobalFiles[r.Fname].Writer
+	if writer != r.ClientID {
 		return errors.New("client is not currently designated as the file's writer")
 	}
 	s.GlobalFiles[r.Fname].Lock.Lock()
@@ -242,9 +246,9 @@ func (s *Server) DisconnectClient() {
 
 	if len(s.Clients) > 0 {
 		for client, info := range s.Clients {
-			if info.LastSeen.Before(timeout) {
+			if info.LastSeen.Before(timeout) && info.RPCClient != nil {
 				info.RPCClient = nil
-				fmt.Println("removing client and unblocking files it's writing to")
+				fmt.Printf("removing client %s and unblocking files it's writing to\n", client)
 				s.Clients[client] = info
 				for _, file := range info.Files {
 					f := s.GlobalFiles[file]

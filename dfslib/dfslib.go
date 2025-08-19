@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	cs "github.com/beel-ww/dfs/definitions"
 )
@@ -236,6 +238,15 @@ func MountDFS(serverAddr string, localIP string, localPath string) (dfs DFS, err
 			fmt.Println("failed to register, server will not be able to make calls to this client")
 		}
 	}
+	go func() {
+		for range 2 * time.Second {
+			var alive bool
+			err := client.DFSClient.Call("Server.Heartbeat", client.ClientID, &alive)
+			if !alive || err != nil {
+				client.Connected = false
+			}
+		}
+	}()
 	return client, nil
 }
 
@@ -263,7 +274,7 @@ func (d *DFSClient) Listen(addr string) error {
 	go http.Serve(listener, nil)
 	fmt.Println("listening to server")
 
-	select {}
+	return nil
 }
 
 func (d *DFSClient) LocalFileExists(fname string) (exists bool, err error) {
@@ -308,68 +319,56 @@ func (d *DFSClient) Open(fname string, mode FileMode) (f DFSFile, err error) {
 
 	switch mode {
 	case READ, WRITE:
-		exists, err := d.LocalFileExists(fname)
+		var succ bool
+		err := d.DFSClient.Call("Server.Open", cs.OpenReq{
+			ClientID: d.ClientID,
+			Fname:    fname,
+			Mode:     cs.FileMode(mode),
+		}, &succ)
+		if err != nil {
+			return nil, fmt.Errorf("server rejected open: %w", err)
+		}
+		if !succ {
+			return nil, fmt.Errorf("open rejected: file may already have a writer or not exist in READ mode")
+		}
+
+		contents, err := os.OpenFile(filepath.Join(d.LocalPath, fname+".dfs"), os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, err
 		}
-		globalExistence, err := d.GlobalFileExists(fname)
+
+		// Load version map
+		chunkVMap, err := versMap(filepath.Join(d.LocalPath, fname))
 		if err != nil {
-			fmt.Println("failed to check if file exists globally")
+			return nil, err
 		}
 
-		if exists || globalExistence {
-			contents, err := os.OpenFile(filepath.Join(d.LocalPath, fname), os.O_RDWR, 0644)
-			if err != nil {
-				panic(err)
-			}
-
-			chunkVMap, err := versMap(filepath.Join(d.LocalPath, fname))
-			if err != nil {
-				panic(err)
-			}
-
-			return &DFile{
-				Mode:   mode,
-				DaFile: contents,
-				Client: d,
-				VMap:   chunkVMap,
-			}, nil
-		}
-
-		if mode == WRITE && !globalExistence {
-			contents, err := os.OpenFile(filepath.Join(d.LocalPath, fname), os.O_RDWR|os.O_CREATE, 0644)
-			if err != nil {
-				panic(err)
-			}
-			chunkVMap, err := versMap(filepath.Join(d.LocalPath, fname))
-			if err != nil {
-				panic(err)
-			}
-
-			return &DFile{
-				Mode:   mode,
-				DaFile: contents,
-				Client: d,
-				VMap:   chunkVMap,
-			}, nil
-		}
-
-		return nil, errors.New("could not open file")
+		return &DFile{
+			Mode:   mode,
+			DaFile: contents,
+			Client: d,
+			VMap:   chunkVMap,
+		}, nil
 	case DREAD:
-		exists, err := d.LocalFileExists(fname)
+		exists, err := d.LocalFileExists(fname + ".dfs")
 		if err != nil || !exists {
 			return nil, FileDoesNotExistError(fname)
 		}
 
-		contents, err := os.OpenFile(filepath.Join(d.LocalPath, fname), os.O_RDONLY, 0444)
+		contents, err := os.OpenFile(filepath.Join(d.LocalPath, fname+".dfs"), os.O_RDONLY, 0444)
 		if err != nil {
 			panic(err)
+		}
+
+		m, err := versMap(filepath.Join(d.LocalPath, fname))
+		if err != nil {
+			return nil, err
 		}
 		return &DFile{
 			Mode:   mode,
 			DaFile: contents,
 			Client: nil,
-			VMap:   nil,
+			VMap:   m,
 		}, nil
 	}
 
@@ -416,6 +415,7 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 			return DisconnectedError(f.Client.ServerAddr)
 		}
 		//to-do
+		fmt.Printf("attempting to read %s", f.DaFile.Name())
 		var latest bool
 		f.Client.DFSClient.Call("Server.CheckVers", cs.CheckReq{
 			Fname:    strings.TrimSuffix(f.DaFile.Name(), ".dfs"),
@@ -436,7 +436,7 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 			return nil
 		}
 		_, err := f.DaFile.ReadAt(data[:], int64(chunkNum)*int64(cs.ChunkLength))
-		if err != nil {
+		if err != nil && err != io.EOF {
 			panic(err)
 		}
 		*chunk = data
@@ -502,11 +502,11 @@ func (f *DFile) Close() (err error) {
 		if err != nil || !succ {
 			fmt.Println("the server failed to register the file close")
 		}
-		saveMap(filepath.Join(f.Client.LocalPath, f.DaFile.Name()), f.VMap)
+		saveMap(filepath.Join(f.Client.LocalPath, strings.TrimSuffix(f.DaFile.Name(), ".dfs")), f.VMap)
 		err = f.DaFile.Close()
 		return err
 	case DREAD:
-		saveMap(filepath.Join(f.Client.LocalPath, f.DaFile.Name()), f.VMap)
+		saveMap(filepath.Join(f.Client.LocalPath, strings.TrimSuffix(f.DaFile.Name(), ".dfs")), f.VMap)
 		err = f.DaFile.Close()
 		return err
 	}
@@ -563,22 +563,46 @@ func versMap(fname string) (vmap map[uint8]uint16, err error) {
 
 	decoder := gob.NewDecoder(file)
 	if err := decoder.Decode(&m); err != nil {
-		panic(err)
+		if err == io.EOF {
+			return make(map[uint8]uint16), nil
+		} else {
+			return nil, fmt.Errorf("failed to decode version map")
+		}
 	}
 
 	return m, nil
 }
 
 // used for saving chunk versions map to disk
-func saveMap(fname string, vmap map[uint8]uint16) {
+// func saveMap(fname string, vmap map[uint8]uint16) {
+// 	file, err := os.Create(fname)
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	defer file.Close()
+
+//		encoder := gob.NewEncoder(file)
+//		if err := encoder.Encode(vmap); err != nil {
+//			log.Fatal("failed to save version map to file")
+//		}
+//	}
+
+func saveMap(fname string, vmap map[uint8]uint16) error {
 	file, err := os.Create(fname)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("failed to create version map file: %w", err)
 	}
 	defer file.Close()
 
 	encoder := gob.NewEncoder(file)
 	if err := encoder.Encode(vmap); err != nil {
-		log.Fatal("failed to save version map to file")
+		return fmt.Errorf("failed to encode version map: %w", err)
 	}
+
+	// Ensure contents are written to disk
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("failed to sync version map file: %w", err)
+	}
+
+	return nil
 }
