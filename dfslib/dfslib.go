@@ -415,7 +415,7 @@ func (f *DFile) Read(chunkNum uint8, chunk *Chunk) (err error) {
 			return DisconnectedError(f.Client.ServerAddr)
 		}
 		//to-do
-		fmt.Printf("attempting to read %s", f.DaFile.Name())
+		fmt.Printf("attempting to read %s\n", f.DaFile.Name())
 		name := strings.TrimPrefix(f.DaFile.Name(), f.Client.LocalPath)
 		var latest bool
 		f.Client.DFSClient.Call("Server.CheckVers", cs.CheckReq{
@@ -580,20 +580,6 @@ func versMap(fname string) (vmap map[uint8]uint16, err error) {
 
 	return m, nil
 }
-
-// used for saving chunk versions map to disk
-// func saveMap(fname string, vmap map[uint8]uint16) {
-// 	file, err := os.Create(fname)
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	defer file.Close()
-
-//		encoder := gob.NewEncoder(file)
-//		if err := encoder.Encode(vmap); err != nil {
-//			log.Fatal("failed to save version map to file")
-//		}
-//	}
 
 func saveMap(fname string, vmap map[uint8]uint16) error {
 	file, err := os.Create(fname)
